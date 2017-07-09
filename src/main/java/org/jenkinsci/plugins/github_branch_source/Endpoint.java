@@ -69,6 +69,7 @@ public class Endpoint extends AbstractDescribableImpl<Endpoint> {
 
     private final String name;
     private final String apiUri;
+    private final String commitStatusContextIdentifier;
 
     /**
      * Makes best effort to guess a "sensible" display name from the hostname in the apiUri.
@@ -111,7 +112,7 @@ public class Endpoint extends AbstractDescribableImpl<Endpoint> {
     }
 
     @DataBoundConstructor
-    public Endpoint(String apiUri, String name) {
+    public Endpoint(String apiUri, String name, String commitStatusContextIdentifier) {
         this.apiUri = GitHubConfiguration.normalizeApiUri(Util.fixEmptyAndTrim(apiUri));
         name = Util.fixEmptyAndTrim(name);
         if (name == null) {
@@ -119,11 +120,12 @@ public class Endpoint extends AbstractDescribableImpl<Endpoint> {
         } else {
             this.name = name;
         }
+        this.commitStatusContextIdentifier = commitStatusContextIdentifier;
     }
 
     private Object readResolve() throws ObjectStreamException {
         if (!apiUri.equals(GitHubConfiguration.normalizeApiUri(apiUri))) {
-            return new Endpoint(apiUri, name);
+            return new Endpoint(apiUri, name, commitStatusContextIdentifier);
         }
         return this;
     }
@@ -138,11 +140,17 @@ public class Endpoint extends AbstractDescribableImpl<Endpoint> {
         return name;
     }
 
+    @NonNull
+    public String getCommitStatusContextIdentifier() {
+        return commitStatusContextIdentifier;
+    }
+
     @Override
     public String toString() {
         final StringBuilder sb = new StringBuilder("Endpoint{");
         sb.append("apiUrl='").append(apiUri).append('\'');
         sb.append(", name='").append(name).append('\'');
+        // sb.append(", commitStatusContextIdentifier='").append(commitStatusContextIdentifier).append('\'');
         sb.append('}');
         return sb.toString();
     }
@@ -174,6 +182,7 @@ public class Endpoint extends AbstractDescribableImpl<Endpoint> {
     public static class DesciptorImpl extends Descriptor<Endpoint> {
 
         private static final Logger LOGGER = Logger.getLogger(DesciptorImpl.class.getName());
+        public static final String defaultCommitStatusContextIdentifier = "continuous-integration/jenkins";
 
         @Override
         public String getDisplayName() {
