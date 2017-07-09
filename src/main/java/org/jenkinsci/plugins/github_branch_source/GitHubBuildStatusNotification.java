@@ -29,8 +29,6 @@ import edu.umd.cs.findbugs.annotations.NonNull;
 import hudson.Extension;
 import hudson.FilePath;
 import hudson.model.Computer;
-import hudson.model.Item;
-import hudson.model.ItemGroup;
 import hudson.model.Job;
 import hudson.model.Queue;
 import hudson.model.Result;
@@ -49,6 +47,7 @@ import java.util.logging.Logger;
 import jenkins.model.Jenkins;
 import jenkins.plugins.git.AbstractGitSCMSource.SCMRevisionImpl;
 import jenkins.scm.api.SCMHead;
+import jenkins.scm.api.SCMHeadObserver;
 import jenkins.scm.api.SCMRevision;
 import jenkins.scm.api.SCMRevisionAction;
 import jenkins.scm.api.SCMSource;
@@ -72,54 +71,57 @@ public class GitHubBuildStatusNotification {
 
     private static void createCommitStatus(@NonNull GHRepository repo, @NonNull String revision,
                                            @NonNull GHCommitState state, @NonNull String url, @NonNull String message,
-                                           @NonNull SCMHead head,
-                                           @NonNull Endpoint endpoint) throws IOException {
+                                           @NonNull SCMHead head) throws IOException {
         LOGGER.log(Level.FINE, "{0}/commit/{1} {2} from {3}", new Object[] {repo.getHtmlUrl(), revision, state, url});
         String context;
-        String commitstatuscontext = endpoint.getCommitStatusContextIdentifier();
-
         if (head instanceof PullRequestSCMHead) {
             if (((PullRequestSCMHead) head).isMerge()) {
-                context = commitstatuscontext + "/pr-merge";
-
+                context = "continuous-integration/jenkins/pr-merge";
             } else {
-                context = commitstatuscontext + "/pr-head";
+                context = "continuous-integration/jenkins/pr-head";
             }
         } else {
-            context = commitstatuscontext + "/branch";
+            context = "continuous-integration/jenkins/branch";
         }
         repo.createCommitStatus(revision, state, url, message, context);
     }
 
-    private static void createBuildCommitStatus(Run<?,?> build, TaskListener listener) {
-        try {
-            GitHub gitHub = lookUpGitHub(build.getParent());
+    private static void createBuildCommitStatus(Run<?, ?> build, TaskListener listener) {
+        SCMRevision revision = SCMRevisionAction.getRevision(build);
+        if (revision != null) { // only notify if we have a revision to notify
             try {
-                GHRepository repo = lookUpRepo(gitHub, build.getParent());
-                Endpoint endpoint = lookUpEndpoint(build.getParent());
-                if (repo != null && endpoint != null) {
-                    SCMRevisionAction action = build.getAction(SCMRevisionAction.class);
-                    if (action != null) {
-                        SCMRevision revision = action.getRevision();
-                        String url = DisplayURLProvider.get().getRunURL(build);
+                GitHub gitHub = lookUpGitHub(build.getParent());
+                try {
+                    GHRepository repo = lookUpRepo(gitHub, build.getParent());
+                    if (repo != null) {
+                        String url = null;
+                        try {
+                            url = DisplayURLProvider.get().getRunURL(build);
+                        } catch (IllegalStateException e) {
+                            listener.getLogger().println(
+                                    "Can not determine Jenkins root URL. Commit status notifications are disabled "
+                                            + "until a root URL is"
+                                            + " configured in Jenkins global configuration.");
+                            return;
+                        }
                         boolean ignoreError = false;
                         try {
                             Result result = build.getResult();
                             String revisionToNotify = resolveHeadCommit(revision);
                             SCMHead head = revision.getHead();
                             if (Result.SUCCESS.equals(result)) {
-                                createCommitStatus(repo, revisionToNotify, GHCommitState.SUCCESS, url, Messages.GitHubBuildStatusNotification_CommitStatus_Good(), head, endpoint);
+                                createCommitStatus(repo, revisionToNotify, GHCommitState.SUCCESS, url, Messages.GitHubBuildStatusNotification_CommitStatus_Good(), head);
                             } else if (Result.UNSTABLE.equals(result)) {
-                                createCommitStatus(repo, revisionToNotify, GHCommitState.FAILURE, url, Messages.GitHubBuildStatusNotification_CommitStatus_Unstable(), head, endpoint);
+                                createCommitStatus(repo, revisionToNotify, GHCommitState.FAILURE, url, Messages.GitHubBuildStatusNotification_CommitStatus_Unstable(), head);
                             } else if (Result.FAILURE.equals(result)) {
-                                createCommitStatus(repo, revisionToNotify, GHCommitState.ERROR, url, Messages.GitHubBuildStatusNotification_CommitStatus_Failure(), head, endpoint);
+                                createCommitStatus(repo, revisionToNotify, GHCommitState.ERROR, url, Messages.GitHubBuildStatusNotification_CommitStatus_Failure(), head);
                             } else if (Result.ABORTED.equals(result)) {
-                                createCommitStatus(repo, revisionToNotify, GHCommitState.ERROR, url, Messages.GitHubBuildStatusNotification_CommitStatus_Aborted(), head, endpoint);
+                                createCommitStatus(repo, revisionToNotify, GHCommitState.ERROR, url, Messages.GitHubBuildStatusNotification_CommitStatus_Aborted(), head);
                             } else if (result != null) { // NOT_BUILT etc.
-                                createCommitStatus(repo, revisionToNotify, GHCommitState.ERROR, url, Messages.GitHubBuildStatusNotification_CommitStatus_Other(), head, endpoint);
+                                createCommitStatus(repo, revisionToNotify, GHCommitState.ERROR, url, Messages.GitHubBuildStatusNotification_CommitStatus_Other(), head);
                             } else {
                                 ignoreError = true;
-                                createCommitStatus(repo, revisionToNotify, GHCommitState.PENDING, url, Messages.GitHubBuildStatusNotification_CommitStatus_Pending(), head, endpoint);
+                                createCommitStatus(repo, revisionToNotify, GHCommitState.PENDING, url, Messages.GitHubBuildStatusNotification_CommitStatus_Pending(), head);
                             }
                             if (result != null) {
                                 listener.getLogger().format("%n" + Messages.GitHubBuildStatusNotification_CommitStatusSet() + "%n%n");
@@ -139,16 +141,16 @@ public class GitHubBuildStatusNotification {
                             }
                         }
                     }
+                } finally {
+                    Connector.release(gitHub);
                 }
-            } finally {
-                Connector.release(gitHub);
-            }
-        } catch (IOException ioe) {
-            listener.getLogger().format("%n"
-                    + "Could not update commit status. Message: %s%n"
-                    + "%n", ioe.getMessage());
-            if (LOGGER.isLoggable(Level.FINE)) {
-                LOGGER.log(Level.FINE, "Could not update commit status of run " + build.getFullDisplayName(), ioe);
+            } catch (IOException ioe) {
+                listener.getLogger().format("%n"
+                        + "Could not update commit status. Message: %s%n"
+                        + "%n", ioe.getMessage());
+                if (LOGGER.isLoggable(Level.FINE)) {
+                    LOGGER.log(Level.FINE, "Could not update commit status of run " + build.getFullDisplayName(), ioe);
+                }
             }
         }
     }
@@ -179,7 +181,8 @@ public class GitHubBuildStatusNotification {
      * Returns the GitHub Repository associated to a Job.
      *
      * @param job A {@link Job}
-     * @return A {@link GHRepository} or null, either if a scan credentials was not provided, or a GitHubSCMSource was not defined.
+     * @return A {@link GHRepository} or {@code null}, if any of: a credentials was not provided; notifications were
+     * disabled, or the job is not from a {@link GitHubSCMSource}.
      * @throws IOException
      */
     @CheckForNull
@@ -187,30 +190,14 @@ public class GitHubBuildStatusNotification {
         SCMSource src = SCMSource.SourceByItem.findSource(job);
         if (src instanceof GitHubSCMSource) {
             GitHubSCMSource source = (GitHubSCMSource) src;
+            if (new GitHubSCMSourceContext(null, SCMHeadObserver.none())
+                    .withTraits(source.getTraits())
+                    .notificationsDisabled()) {
+                return null;
+            }
             if (source.getScanCredentialsId() != null) {
                 return Connector.connect(source.getApiUri(), Connector.lookupScanCredentials
                         (job, null, source.getScanCredentialsId()));
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Returns the Endpoint associated to a Job.
-     *
-     * @param job A {@link Job}
-     * @return An {@link Endpoint} or null, if an Endpoint was not defined.
-     * @throws IOException
-     */
-    @CheckForNull
-    private static Endpoint lookUpEndpoint(@NonNull Job<?,?> job) throws IOException {
-        SCMSource src = SCMSource.SourceByItem.findSource(job);
-        if (src instanceof GitHubSCMSource) {
-            GitHubSCMSource source = (GitHubSCMSource) src;
-            for (Endpoint e : GitHubConfiguration.get().getEndpoints()) {
-                if (e.getApiUri().equals(source.getApiUri())) {
-                    return e;
-                }
             }
         }
         return null;
@@ -241,10 +228,22 @@ public class GitHubBuildStatusNotification {
             if (!(head instanceof PullRequestSCMHead)) {
                 return;
             }
+            if (new GitHubSCMSourceContext(null, SCMHeadObserver.none())
+                    .withTraits(((GitHubSCMSource) source).getTraits())
+                    .notificationsDisabled()) {
+                return;
+            }
             // prevent delays in the queue when updating github
             Computer.threadPoolForRemoting.submit(new Runnable() {
                 @Override
                 public void run() {
+                    String url;
+                    try {
+                        url = DisplayURLProvider.get().getJobURL(job);
+                    } catch (IllegalStateException e) {
+                        // no root url defined, cannot notify, let's get out of here
+                        return;
+                    }
                     GitHub gitHub = null;
                     try {
                         gitHub = lookUpGitHub(job);
@@ -261,9 +260,7 @@ public class GitHubBuildStatusNotification {
                                 return;
                             }
                             GHRepository repo = lookUpRepo(gitHub, job);
-                            Endpoint endpoint = lookUpEndpoint(job);
-                            if (repo != null && endpoint != null) {
-                                String url = DisplayURLProvider.get().getJobURL(job);
+                            if (repo != null) {
                                 // The submitter might push another commit before this build even starts.
                                 if (Jenkins.getActiveInstance().getQueue().getItem(taskId) instanceof Queue.LeftItem) {
                                     // we took too long and the item has left the queue, no longer valid to apply pending
@@ -272,7 +269,7 @@ public class GitHubBuildStatusNotification {
                                     return;
                                 }
                                 createCommitStatus(repo, hash, GHCommitState.PENDING, url,
-                                        Messages.GitHubBuildStatusNotification_CommitStatus_Queued(), head, endpoint);
+                                        Messages.GitHubBuildStatusNotification_CommitStatus_Queued(), head);
                             }
                         } finally {
                             Connector.release(gitHub);
@@ -280,15 +277,15 @@ public class GitHubBuildStatusNotification {
                     } catch (FileNotFoundException e) {
                         LOGGER.log(Level.WARNING,
                                 "Could not update commit status to PENDING. Valid scan credentials? Valid scopes?",
-                                LOGGER.isLoggable(Level.FINE) ? e : (Throwable)null);
+                                LOGGER.isLoggable(Level.FINE) ? e : null);
                     } catch (IOException e) {
                         LOGGER.log(Level.WARNING,
                                 "Could not update commit status to PENDING. Message: " + e.getMessage(),
-                                LOGGER.isLoggable(Level.FINE) ? e : (Throwable) null);
+                                LOGGER.isLoggable(Level.FINE) ? e : null);
                     } catch (InterruptedException e) {
                         LOGGER.log(Level.WARNING,
                                 "Could not update commit status to PENDING. Rate limit exhausted",
-                                LOGGER.isLoggable(Level.FINE) ? e : (Throwable) null);
+                                LOGGER.isLoggable(Level.FINE) ? e : null);
                         LOGGER.log(Level.FINE, null, e);
                     } finally {
                         Connector.release(gitHub);
